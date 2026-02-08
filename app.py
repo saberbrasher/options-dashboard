@@ -13,21 +13,31 @@ st.set_page_config(
 
 st.markdown("## 📊 Options Activity Tracker")
 
-with st.expander("ℹ️ How to read this table", expanded=False):
+with st.expander("ℹ️ How to read this dashboard", expanded=False):
     st.markdown("""
+### Key Metrics
+
 **Vol / OI (Volume ÷ Open Interest)**  
 Measures how aggressively contracts are trading relative to existing positions.
 
 **Relative Volume**  
-Compares a contract’s volume to the *median volume* of the entire option chain.  
+Compares a contract’s volume to the *median volume* of the option chain.  
 Values above **1.0×** indicate elevated interest.
 
-**Activity Levels**
-- **Unusual** → Elevated but common
-- **High** → Often institutional
-- **Extreme** → Rare, aggressive positioning (no upper cap)
+**% From Spot**  
+Distance between strike price and current stock price.  
+Institutions often concentrate activity **near-the-money**.
 
-Large funds often build positions over time — repeated or clustered appearances matter.
+**Moneyness**
+- **ITM** → In the money  
+- **ATM** → Near the current price  
+- **OTM** → Out of the money  
+
+### Interpreting Flow
+- Call-heavy ≠ bullish by default  
+- Put-heavy ≠ bearish by default  
+
+Context matters: price action, persistence, and location (ATM vs OTM).
 """)
 
 # =========================
@@ -51,8 +61,7 @@ UNUSUAL_MIN = st.sidebar.number_input(
     "Unusual (Vol / OI ≥)",
     min_value=0.1,
     value=1.0,
-    step=0.1,
-    help="Volume divided by Open Interest"
+    step=0.1
 )
 
 HIGH_MIN = st.sidebar.number_input(
@@ -66,8 +75,7 @@ EXTREME_MIN = st.sidebar.number_input(
     "Extreme activity ≥",
     min_value=HIGH_MIN,
     value=max(HIGH_MIN * 2, HIGH_MIN + 1),
-    step=0.5,
-    help="No upper bound — extreme activity scales naturally"
+    step=0.5
 )
 
 MIN_VOLUME = st.sidebar.number_input(
@@ -77,9 +85,6 @@ MIN_VOLUME = st.sidebar.number_input(
     step=10
 )
 
-# =========================
-# Sidebar: Refresh
-# =========================
 AUTO_REFRESH = st.sidebar.checkbox("Auto-refresh every 60s", value=True)
 
 # =========================
@@ -96,6 +101,12 @@ def load_chain(ticker, expiration):
     return chain.calls, chain.puts
 
 
+@st.cache_data(ttl=60)
+def get_spot_price(ticker):
+    hist = yf.Ticker(ticker).history(period="1d")
+    return hist["Close"].iloc[-1] if not hist.empty else None
+
+
 def classify_activity(ratio):
     if pd.isna(ratio):
         return "Unknown"
@@ -110,10 +121,9 @@ def classify_activity(ratio):
 
 def add_relative_volume(df):
     median_vol = df["volume"].median()
-    if pd.isna(median_vol) or median_vol == 0:
-        df["relative_volume"] = pd.NA
-    else:
-        df["relative_volume"] = df["volume"] / median_vol
+    df["relative_volume"] = (
+        df["volume"] / median_vol if median_vol and median_vol > 0 else pd.NA
+    )
     return df
 
 
@@ -126,7 +136,7 @@ def style_activity(col):
     return [styles.get(v, "") for v in col]
 
 
-def find_unusual(df, option_type, symbol, expiration):
+def find_unusual(df, option_type, symbol, expiration, spot):
     df = df.copy()
 
     df["volume"] = df["volume"].fillna(0).astype(int)
@@ -136,6 +146,17 @@ def find_unusual(df, option_type, symbol, expiration):
     df["Activity"] = df["Vol / OI"].apply(classify_activity)
 
     df = add_relative_volume(df)
+
+    df["Spot"] = spot
+    df["% From Spot"] = ((df["strike"] - spot) / spot).abs() * 100
+
+    df["Moneyness"] = "ATM"
+    if option_type == "CALL":
+        df.loc[df["strike"] > spot, "Moneyness"] = "OTM"
+        df.loc[df["strike"] < spot, "Moneyness"] = "ITM"
+    else:
+        df.loc[df["strike"] < spot, "Moneyness"] = "OTM"
+        df.loc[df["strike"] > spot, "Moneyness"] = "ITM"
 
     filtered = df[
         (df["volume"] >= MIN_VOLUME) &
@@ -156,6 +177,9 @@ def find_unusual(df, option_type, symbol, expiration):
             "Type",
             "Expiration",
             "Strike",
+            "Spot",
+            "% From Spot",
+            "Moneyness",
             "volume",
             "relative_volume",
             "openInterest",
@@ -174,10 +198,15 @@ def find_unusual(df, option_type, symbol, expiration):
 # =========================
 # Main processing
 # =========================
-results = []
+contract_results = []
+imbalance_rows = []
 
 for symbol in watchlist:
     try:
+        spot = get_spot_price(symbol)
+        if spot is None:
+            continue
+
         expirations = get_expirations(symbol)
         if not expirations:
             continue
@@ -185,8 +214,30 @@ for symbol in watchlist:
         expiration = expirations[0]
         calls, puts = load_chain(symbol, expiration)
 
-        results.append(find_unusual(calls, "CALL", symbol, expiration))
-        results.append(find_unusual(puts, "PUT", symbol, expiration))
+        # ---- Feature #3: Call vs Put Imbalance ----
+        call_vol = calls["volume"].fillna(0).sum()
+        put_vol = puts["volume"].fillna(0).sum()
+
+        ratio = call_vol / put_vol if put_vol > 0 else None
+
+        bias = "Neutral"
+        if ratio is not None:
+            if ratio > 1.3:
+                bias = "Call-heavy"
+            elif ratio < 0.7:
+                bias = "Put-heavy"
+
+        imbalance_rows.append({
+            "Ticker": symbol,
+            "Expiration": expiration,
+            "Call Volume": int(call_vol),
+            "Put Volume": int(put_vol),
+            "Call / Put Ratio": ratio,
+            "Flow Bias": bias
+        })
+
+        contract_results.append(find_unusual(calls, "CALL", symbol, expiration, spot))
+        contract_results.append(find_unusual(puts, "PUT", symbol, expiration, spot))
 
     except Exception:
         st.warning(f"{symbol}: failed to load options data")
@@ -195,8 +246,30 @@ for symbol in watchlist:
 # Display
 # =========================
 
+# ---- Call / Put Imbalance Table ----
+if imbalance_rows:
+    st.markdown("#### ⚖️ Call vs Put Volume Imbalance")
+    st.caption("Directional skew — not standalone intent")
 
-valid = [df for df in results if not df.empty]
+    imbalance_df = pd.DataFrame(imbalance_rows).sort_values(
+        "Call / Put Ratio", ascending=False
+    )
+
+    st.dataframe(
+        imbalance_df.style.format({
+            "Call / Put Ratio": "{:.2f}",
+            "Call Volume": "{:d}",
+            "Put Volume": "{:d}",
+        }),
+        use_container_width=True,
+        hide_index=True
+    )
+
+# ---- Contract-Level Activity ----
+valid = [df for df in contract_results if not df.empty]
+
+st.markdown("#### 🚨 Contract-Level Unusual Options Activity")
+st.caption("Sorted by Vol / OI — highest conviction signals first")
 
 if not valid:
     st.info("No unusual activity detected with current settings.")
@@ -207,20 +280,17 @@ else:
     styled = (
         df.style
         .format({
-            "Vol / OI": "{:.2f}",
+            "% From Spot": "{:.1f}%",
             "Relative Volume": "{:.1f}×",
             "Implied Volatility": "{:.2%}",
             "Volume": "{:d}",
             "Open Interest": "{:d}",
+            "Spot": "${:,.2f}",
         })
         .apply(style_activity, subset=["Activity"])
     )
 
-    st.dataframe(
-        styled,
-        use_container_width=True,
-        hide_index=True
-    )
+    st.dataframe(styled, use_container_width=True, hide_index=True)
 
 # =========================
 # Auto-refresh
