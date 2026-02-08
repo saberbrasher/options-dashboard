@@ -12,32 +12,85 @@ st.set_page_config(
 )
 
 st.markdown("## 📊 Options Activity Tracker")
+st.caption(f"Last updated: {pd.Timestamp.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
+st.caption("Not investment advice. Data delayed and sourced from public options chains.")
+
 
 with st.expander("ℹ️ How to read this dashboard", expanded=False):
     st.markdown("""
 ### Key Metrics
 
 **Vol / OI (Volume ÷ Open Interest)**  
-Measures how aggressively contracts are trading relative to existing positions.
+**Formula:**  
+`Vol / OI = Contract Volume ÷ Open Interest`  
+
+**What it means:**  
+Measures how much *new trading* is occurring relative to existing positions.  
+- **> 1.0** → Today’s activity exceeds the number of open contracts  
+- Suggests new positioning; common first-pass filter for unusual activity
+
+---
 
 **Relative Volume**  
-Compares a contract’s volume to the *median volume* of the option chain.  
-Values above **1.0×** indicate elevated interest.
+**Formula:**  
+`Relative Volume = Contract Volume ÷ Median Volume of Option Chain`  
+
+**What it means:**  
+Normalizes volume across the option chain so strikes and expirations can be compared fairly.  
+- **1.0×** → Typical activity  
+- **> 1.0×** → Elevated interest relative to peers  
+- Highlights contracts standing out within the same expiration
+
+---
 
 **% From Spot**  
-Distance between strike price and current stock price.  
-Institutions often concentrate activity **near-the-money**.
+**Formula:**  
+`% From Spot = |Strike − Spot Price| ÷ Spot Price × 100`  
 
-**Moneyness**
-- **ITM** → In the money  
-- **ATM** → Near the current price  
-- **OTM** → Out of the money  
+**What it means:**  
+Shows how far a strike is from the current stock price.  
+- Smaller values = **near-the-money (ATM)**  
+- Institutions often concentrate activity **close to spot**  
+- Large distances may reflect hedging or speculative positioning
 
-### Interpreting Flow
+---
+
+**Moneyness**  
+**Definition:**  
+Describes whether an option would have intrinsic value if exercised now.
+
+- **ITM (In the Money)**  
+  - Calls: Strike < Spot  
+  - Puts: Strike > Spot  
+
+- **ATM (At the Money)**  
+  - Strike ≈ Spot  
+
+- **OTM (Out of the Money)**  
+  - Calls: Strike > Spot  
+  - Puts: Strike < Spot  
+
+Moneyness helps contextualize intent (directional vs hedging).
+
+---
+
+**Call / Put Volume Ratio**  
+**Formula:**  
+`Call / Put Ratio = Total Call Volume ÷ Total Put Volume`  
+
+**What it means:**  
+High-level view of directional skew in options trading for a given expiration.  
+- **> 1.3** → Call-heavy flow  
+- **< 0.7** → Put-heavy flow  
+- Best used as **context**, not a standalone signal
+
+---
+
+**Interpreting Flow**
+                
+Options flow reflects positioning, not intent. 
 - Call-heavy ≠ bullish by default  
-- Put-heavy ≠ bearish by default  
-
-Context matters: price action, persistence, and location (ATM vs OTM).
+- Put-heavy ≠ bearish by default    
 """)
 
 # =========================
@@ -85,7 +138,7 @@ MIN_VOLUME = st.sidebar.number_input(
     step=10
 )
 
-AUTO_REFRESH = st.sidebar.checkbox("Auto-refresh every 60s", value=True)
+AUTO_REFRESH = st.sidebar.checkbox("Auto-refresh every 60s", value=False)
 
 # =========================
 # Data helpers
@@ -214,7 +267,7 @@ for symbol in watchlist:
         expiration = expirations[0]
         calls, puts = load_chain(symbol, expiration)
 
-        # ---- Feature #3: Call vs Put Imbalance ----
+        # ---- Call vs Put Imbalance ----
         call_vol = calls["volume"].fillna(0).sum()
         put_vol = puts["volume"].fillna(0).sum()
 
@@ -242,9 +295,6 @@ for symbol in watchlist:
     except Exception:
         st.warning(f"{symbol}: failed to load options data")
 
-# =========================
-# Display
-# =========================
 
 # ---- Call / Put Imbalance Table ----
 if imbalance_rows:
@@ -264,6 +314,8 @@ if imbalance_rows:
         use_container_width=True,
         hide_index=True
     )
+
+st.markdown("---")
 
 # ---- Contract-Level Activity ----
 valid = [df for df in contract_results if not df.empty]
