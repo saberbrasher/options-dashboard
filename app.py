@@ -2,6 +2,8 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import time
+import smtplib
+from email.message import EmailMessage
 
 # =========================
 # Page config
@@ -15,7 +17,9 @@ st.markdown("## 📊 Options Activity Tracker")
 st.caption(f"Last updated: {pd.Timestamp.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
 st.caption("Not investment advice. Data delayed and sourced from public options chains.")
 
-
+# =========================
+# Help / Definitions
+# =========================
 with st.expander("ℹ️ How to read this dashboard", expanded=False):
     st.markdown("""
 ### Key Metrics
@@ -90,53 +94,27 @@ High-level view of directional skew in options trading for a given expiration.
                 
 Options flow reflects positioning, not intent. 
 - Call-heavy ≠ bullish by default  
-- Put-heavy ≠ bearish by default    
+- Put-heavy ≠ bearish by default  
 """)
 
 # =========================
-# Sidebar: Watchlist
+# Sidebar
 # =========================
 st.sidebar.markdown("### 📌 Watchlist")
 
 watchlist_input = st.sidebar.text_area(
     "Tickers (comma-separated)",
-    value="XLF, SPXL, TQQQ, B, BRK.B"
+    value="XLF, SPXL, TQQQ, B, BRK-B"
 )
 
 watchlist = [s.strip().upper() for s in watchlist_input.split(",") if s.strip()]
 
-# =========================
-# Sidebar: Activity thresholds
-# =========================
 st.sidebar.markdown("### ⚙️ Activity Interpretation")
 
-UNUSUAL_MIN = st.sidebar.number_input(
-    "Unusual (Vol / OI ≥)",
-    min_value=0.1,
-    value=1.0,
-    step=0.1
-)
-
-HIGH_MIN = st.sidebar.number_input(
-    "High activity ≥",
-    min_value=UNUSUAL_MIN,
-    value=max(UNUSUAL_MIN * 1.5, UNUSUAL_MIN + 0.5),
-    step=0.1
-)
-
-EXTREME_MIN = st.sidebar.number_input(
-    "Extreme activity ≥",
-    min_value=HIGH_MIN,
-    value=max(HIGH_MIN * 2, HIGH_MIN + 1),
-    step=0.5
-)
-
-MIN_VOLUME = st.sidebar.number_input(
-    "Minimum contract volume",
-    min_value=1,
-    value=100,
-    step=10
-)
+UNUSUAL_MIN = st.sidebar.number_input("Unusual (Vol / OI ≥)", 0.1, value=1.0, step=0.1)
+HIGH_MIN = st.sidebar.number_input("High activity ≥", UNUSUAL_MIN, value=1.5, step=0.1)
+EXTREME_MIN = st.sidebar.number_input("Extreme activity ≥", HIGH_MIN, value=3.0, step=0.5)
+MIN_VOLUME = st.sidebar.number_input("Minimum contract volume", 1, value=100, step=10)
 
 AUTO_REFRESH = st.sidebar.checkbox("Auto-refresh every 60s", value=False)
 
@@ -147,18 +125,15 @@ AUTO_REFRESH = st.sidebar.checkbox("Auto-refresh every 60s", value=False)
 def get_expirations(ticker):
     return yf.Ticker(ticker).options
 
-
 @st.cache_data(ttl=60)
 def load_chain(ticker, expiration):
     chain = yf.Ticker(ticker).option_chain(expiration)
     return chain.calls, chain.puts
 
-
 @st.cache_data(ttl=60)
 def get_spot_price(ticker):
     hist = yf.Ticker(ticker).history(period="1d")
     return hist["Close"].iloc[-1] if not hist.empty else None
-
 
 def classify_activity(ratio):
     if pd.isna(ratio):
@@ -171,14 +146,12 @@ def classify_activity(ratio):
         return "Unusual"
     return "Normal"
 
-
 def add_relative_volume(df):
     median_vol = df["volume"].median()
     df["relative_volume"] = (
         df["volume"] / median_vol if median_vol and median_vol > 0 else pd.NA
     )
     return df
-
 
 def style_activity(col):
     styles = {
@@ -187,7 +160,6 @@ def style_activity(col):
         "Unusual": "background-color:#ffd700; color:black; font-weight:600",
     }
     return [styles.get(v, "") for v in col]
-
 
 def find_unusual(df, option_type, symbol, expiration, spot):
     df = df.copy()
@@ -247,7 +219,6 @@ def find_unusual(df, option_type, symbol, expiration, spot):
         "impliedVolatility": "Implied Volatility",
     })
 
-
 # =========================
 # Main processing
 # =========================
@@ -267,10 +238,8 @@ for symbol in watchlist:
         expiration = expirations[0]
         calls, puts = load_chain(symbol, expiration)
 
-        # ---- Call vs Put Imbalance ----
         call_vol = calls["volume"].fillna(0).sum()
         put_vol = puts["volume"].fillna(0).sum()
-
         ratio = call_vol / put_vol if put_vol > 0 else None
 
         bias = "Neutral"
@@ -295,54 +264,125 @@ for symbol in watchlist:
     except Exception:
         st.warning(f"{symbol}: failed to load options data")
 
-
-# ---- Call / Put Imbalance Table ----
+# =========================
+# Tables
+# =========================
 if imbalance_rows:
     st.markdown("#### ⚖️ Call vs Put Volume Imbalance")
-    st.caption("Directional skew — not standalone intent")
-
-    imbalance_df = pd.DataFrame(imbalance_rows).sort_values(
-        "Call / Put Ratio", ascending=False
-    )
-
-    st.dataframe(
-        imbalance_df.style.format({
-            "Call / Put Ratio": "{:.2f}",
-            "Call Volume": "{:d}",
-            "Put Volume": "{:d}",
-        }),
-        use_container_width=True,
-        hide_index=True
-    )
+    imbalance_df = pd.DataFrame(imbalance_rows)
+    st.dataframe(imbalance_df, use_container_width=True, hide_index=True)
 
 st.markdown("---")
 
-# ---- Contract-Level Activity ----
 valid = [df for df in contract_results if not df.empty]
 
 st.markdown("#### 🚨 Contract-Level Unusual Options Activity")
-st.caption("Sorted by Vol / OI — highest conviction signals first")
 
-if not valid:
-    st.info("No unusual activity detected with current settings.")
+if valid:
+    df = pd.concat(valid).sort_values("Vol / OI", ascending=False)
+
+    # Ensure numeric columns are clean
+    numeric_cols = [
+        "% From Spot",
+        "Relative Volume",
+        "Vol / OI",
+        "Implied Volatility",
+        "Volume",
+        "Open Interest",
+        "Spot",
+    ]
+
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # Activity visual encoding (NO Styler)
+    activity_display = {
+        "Extreme": "🟨 Extreme",
+        "High": "🟪 High",
+        "Unusual": "🟦 Unusual",
+    }
+
+    df["Activity"] = df["Activity"].map(activity_display).fillna("Normal")
+
+    # Formatting for display
+    df["% From Spot"] = df["% From Spot"].map(lambda x: f"{x:.1f}%" if pd.notna(x) else "—")
+    df["Relative Volume"] = df["Relative Volume"].map(lambda x: f"{x:.1f}" if pd.notna(x) else "—")
+    df["Vol / OI"] = df["Vol / OI"].map(lambda x: f"{x:.2f}" if pd.notna(x) else "—")
+    df["Implied Volatility"] = df["Implied Volatility"].map(lambda x: f"{x:.2%}" if pd.notna(x) else "—")
+    df["Spot"] = df["Spot"].map(lambda x: f"${x:,.2f}" if pd.notna(x) else "—")
+
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
 else:
-    df = pd.concat(valid).reset_index(drop=True)
-    df = df.sort_values("Vol / OI", ascending=False)
+    st.info("No unusual activity detected.")
 
-    styled = (
-        df.style
-        .format({
-            "% From Spot": "{:.1f}%",
-            "Relative Volume": "{:.1f}×",
-            "Implied Volatility": "{:.2%}",
-            "Volume": "{:d}",
-            "Open Interest": "{:d}",
-            "Spot": "${:,.2f}",
-        })
-        .apply(style_activity, subset=["Activity"])
+
+# =========================
+# Feedback (EMAIL)
+# =========================
+st.markdown("---")
+st.markdown("### 💬 Feedback & Bug Reports 🐞")
+
+with st.expander("Let the dev know how to make this better!", expanded=False):
+    st.markdown(
+        "Prefer GitHub? "
+        "[Open an issue here](https://github.com/saberbrasher/options-dashboard/issues)"
     )
 
-    st.dataframe(styled, use_container_width=True, hide_index=True)
+    feedback_type = st.selectbox(
+        "Feedback type",
+        ["Bug / Error", "Data looks wrong", "Feature request", "General feedback"]
+    )
+
+    feedback_text = st.text_area(
+        "Your message",
+        placeholder="What were you doing? What did you expect?",
+        height=120
+    )
+
+    allow_followup = st.checkbox("I'm okay being contacted")
+    contact_info = ""
+    if allow_followup:
+        contact_info = st.text_input("Email address (optional)")
+
+    if st.button("Send feedback"):
+        if not feedback_text.strip():
+            st.warning("Please enter feedback before submitting.")
+        else:
+            try:
+                msg = EmailMessage()
+                msg["Subject"] = f"Options Tracker Feedback: {feedback_type}"
+                msg["From"] = st.secrets["EMAIL_USER"]
+                msg["To"] = st.secrets["EMAIL_TO"]
+
+                body = f"""
+Feedback type: {feedback_type}
+
+Message:
+{feedback_text}
+
+Contact:
+{contact_info if contact_info else "Anonymous"}
+"""
+                msg.set_content(body)
+
+                with smtplib.SMTP(
+                    st.secrets["EMAIL_HOST"],
+                    st.secrets["EMAIL_PORT"]
+                ) as server:
+                    server.starttls()
+                    server.login(
+                        st.secrets["EMAIL_USER"],
+                        st.secrets["EMAIL_PASSWORD"]
+                    )
+                    server.send_message(msg)
+
+                st.success("Thanks! Your feedback was sent.")
+
+            except Exception as e:
+                st.error("Failed to send feedback email.")
+                st.exception(e)
 
 # =========================
 # Auto-refresh
