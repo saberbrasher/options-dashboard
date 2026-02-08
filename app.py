@@ -100,7 +100,7 @@ st.sidebar.markdown("### 📌 Watchlist")
 
 watchlist_input = st.sidebar.text_area(
     "Tickers (comma-separated)",
-    value="XLF, SPXL, TQQQ, B, BRK.B"
+    value="XLF, SPXL, TQQQ, B, BRK-B"
 )
 
 watchlist = [s.strip().upper() for s in watchlist_input.split(",") if s.strip()]
