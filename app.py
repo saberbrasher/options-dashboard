@@ -321,6 +321,9 @@ else:
 # =========================
 # Feedback (EMAIL)
 # =========================
+import smtplib
+from email.message import EmailMessage
+
 st.markdown("---")
 st.markdown("### 💬 Feedback & Bug Reports 🐞")
 
@@ -330,41 +333,54 @@ with st.expander("Let the dev know how to make this better!", expanded=False):
         "[Open an issue here](https://github.com/saberbrasher/options-dashboard/issues)"
     )
 
-    feedback_type = st.selectbox(
-        "Feedback type",
-        ["Bug / Error", "Data looks wrong", "Feature request", "General feedback"]
-    )
-
-    feedback_text = st.text_area(
-        "Your message",
-        placeholder="What were you doing? What did you expect?",
-        height=120
-    )
-
+    # ---- Live UI (outside form) ----
     allow_followup = st.checkbox("I'm okay being contacted")
+
     contact_info = ""
     if allow_followup:
-        contact_info = st.text_input("Email address (optional)")
+        contact_info = st.text_input(
+            "Email address (optional)",
+            placeholder="you@email.com"
+        )
 
-    if st.button("Send feedback"):
+    # ---- Form (submission only) ----
+    with st.form("feedback_form"):
+        feedback_type = st.selectbox(
+            "Feedback type",
+            ["Bug / Error", "Data looks wrong", "Feature request", "General feedback"]
+        )
+
+        feedback_text = st.text_area(
+            "Your message",
+            placeholder="What were you doing? What did you expect?",
+            height=120
+        )
+
+        submitted = st.form_submit_button("Send feedback")
+
+    if submitted:
         if not feedback_text.strip():
             st.warning("Please enter feedback before submitting.")
         else:
             try:
                 msg = EmailMessage()
-                msg["Subject"] = f"Options Tracker Feedback: {feedback_type}"
+                msg["Subject"] = f"🐞 Options Dashboard Feedback — {feedback_type}"
                 msg["From"] = st.secrets["EMAIL_USER"]
                 msg["To"] = st.secrets["EMAIL_TO"]
 
                 body = f"""
-Feedback type: {feedback_type}
+Feedback type:
+{feedback_type}
 
 Message:
 {feedback_text}
-
-Contact:
-{contact_info if contact_info else "Anonymous"}
 """
+
+                if allow_followup and contact_info:
+                    body += f"\nContact:\n{contact_info}"
+                else:
+                    body += "\nContact:\nAnonymous"
+
                 msg.set_content(body)
 
                 with smtplib.SMTP(
@@ -378,7 +394,7 @@ Contact:
                     )
                     server.send_message(msg)
 
-                st.success("Thanks! Your feedback was sent.")
+                st.success("Thanks! Your feedback was sent 💌")
 
             except Exception as e:
                 st.error("Failed to send feedback email.")
