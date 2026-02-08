@@ -11,12 +11,29 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("📊 Options Activity Tracker")
+st.markdown("## 📊 Options Activity Tracker")
+
+with st.expander("ℹ️ How to read this table", expanded=False):
+    st.markdown("""
+**Vol / OI (Volume ÷ Open Interest)**  
+Measures how aggressively contracts are trading relative to existing positions.
+
+**Relative Volume**  
+Compares a contract’s volume to the *median volume* of the entire option chain.  
+Values above **1.0×** indicate elevated interest.
+
+**Activity Levels**
+- **Unusual** → Elevated but common
+- **High** → Often institutional
+- **Extreme** → Rare, aggressive positioning (no upper cap)
+
+Large funds often build positions over time — repeated or clustered appearances matter.
+""")
 
 # =========================
 # Sidebar: Watchlist
 # =========================
-st.sidebar.header("Watchlist")
+st.sidebar.markdown("### 📌 Watchlist")
 
 watchlist_input = st.sidebar.text_area(
     "Tickers (comma-separated)",
@@ -28,10 +45,10 @@ watchlist = [s.strip().upper() for s in watchlist_input.split(",") if s.strip()]
 # =========================
 # Sidebar: Activity thresholds
 # =========================
-st.sidebar.header("Activity Interpretation")
+st.sidebar.markdown("### ⚙️ Activity Interpretation")
 
 UNUSUAL_MIN = st.sidebar.number_input(
-    "Unusual threshold (Vol / OI ≥)",
+    "Unusual (Vol / OI ≥)",
     min_value=0.1,
     value=1.0,
     step=0.1,
@@ -39,22 +56,22 @@ UNUSUAL_MIN = st.sidebar.number_input(
 )
 
 HIGH_MIN = st.sidebar.number_input(
-    "High activity threshold",
+    "High activity ≥",
     min_value=UNUSUAL_MIN,
     value=max(UNUSUAL_MIN * 1.5, UNUSUAL_MIN + 0.5),
     step=0.1
 )
 
 EXTREME_MIN = st.sidebar.number_input(
-    "Extreme activity threshold",
+    "Extreme activity ≥",
     min_value=HIGH_MIN,
     value=max(HIGH_MIN * 2, HIGH_MIN + 1),
     step=0.5,
-    help="No upper bound — anything above this is extreme"
+    help="No upper bound — extreme activity scales naturally"
 )
 
 MIN_VOLUME = st.sidebar.number_input(
-    "Minimum option volume",
+    "Minimum contract volume",
     min_value=1,
     value=100,
     step=10
@@ -63,8 +80,7 @@ MIN_VOLUME = st.sidebar.number_input(
 # =========================
 # Sidebar: Refresh
 # =========================
-st.sidebar.header("Refresh")
-AUTO_REFRESH = st.sidebar.checkbox("Auto-refresh (60s)", value=True)
+AUTO_REFRESH = st.sidebar.checkbox("Auto-refresh every 60s", value=True)
 
 # =========================
 # Data helpers
@@ -92,51 +108,67 @@ def classify_activity(ratio):
     return "Normal"
 
 
+def add_relative_volume(df):
+    median_vol = df["volume"].median()
+    if pd.isna(median_vol) or median_vol == 0:
+        df["relative_volume"] = pd.NA
+    else:
+        df["relative_volume"] = df["volume"] / median_vol
+    return df
+
+
 def style_activity(col):
-    colors = {
-        "Extreme": "background-color:#00ffff; color:black; font-weight:600",  # cyan
-        "High": "background-color:#8a2be2; color:white; font-weight:600",    # violet
-        "Unusual": "background-color:#ffd700; color:black; font-weight:600", # yellow
+    styles = {
+        "Extreme": "background-color:#00ffff; color:black; font-weight:600",
+        "High": "background-color:#8a2be2; color:white; font-weight:600",
+        "Unusual": "background-color:#ffd700; color:black; font-weight:600",
     }
-    return [colors.get(v, "") for v in col]
+    return [styles.get(v, "") for v in col]
 
 
 def find_unusual(df, option_type, symbol, expiration):
     df = df.copy()
 
-    # Ensure clean numeric types
     df["volume"] = df["volume"].fillna(0).astype(int)
     df["openInterest"] = df["openInterest"].replace(0, pd.NA)
-    df["unusual_score"] = df["volume"] / df["openInterest"]
 
-    df["activity_level"] = df["unusual_score"].apply(classify_activity)
+    df["Vol / OI"] = df["volume"] / df["openInterest"]
+    df["Activity"] = df["Vol / OI"].apply(classify_activity)
+
+    df = add_relative_volume(df)
 
     filtered = df[
         (df["volume"] >= MIN_VOLUME) &
-        (df["activity_level"] != "Normal")
+        (df["Activity"] != "Normal")
     ]
 
     if filtered.empty:
         return filtered
 
-    filtered["symbol"] = symbol
-    filtered["expiration"] = expiration
-    filtered["type"] = option_type
-    filtered["strike"] = filtered["strike"].map(lambda x: f"${x:,.2f}")
+    filtered["Ticker"] = symbol
+    filtered["Expiration"] = expiration
+    filtered["Type"] = option_type
+    filtered["Strike"] = filtered["strike"].map(lambda x: f"${x:,.2f}")
 
     return filtered[
         [
-            "symbol",
-            "type",
-            "expiration",
-            "strike",
+            "Ticker",
+            "Type",
+            "Expiration",
+            "Strike",
             "volume",
+            "relative_volume",
             "openInterest",
-            "unusual_score",
-            "activity_level",
+            "Vol / OI",
+            "Activity",
             "impliedVolatility",
         ]
-    ]
+    ].rename(columns={
+        "volume": "Volume",
+        "relative_volume": "Relative Volume",
+        "openInterest": "Open Interest",
+        "impliedVolatility": "Implied Volatility",
+    })
 
 
 # =========================
@@ -162,13 +194,7 @@ for symbol in watchlist:
 # =========================
 # Display
 # =========================
-st.subheader("🚨 Unusual & Extreme Options Activity")
 
-st.caption(
-    "🛈 **Vol / OI** = Option Volume ÷ Open Interest. "
-    "Values > 1 indicate trading activity exceeding existing positions. "
-    "There is no upper cap — extreme values rise naturally."
-)
 
 valid = [df for df in results if not df.empty]
 
@@ -176,17 +202,18 @@ if not valid:
     st.info("No unusual activity detected with current settings.")
 else:
     df = pd.concat(valid).reset_index(drop=True)
-    df = df.sort_values("unusual_score", ascending=False)
+    df = df.sort_values("Vol / OI", ascending=False)
 
     styled = (
         df.style
         .format({
-            "unusual_score": "{:.2f}",
-            "impliedVolatility": "{:.2%}",
-            "volume": "{:d}",
-            "openInterest": "{:d}",
+            "Vol / OI": "{:.2f}",
+            "Relative Volume": "{:.1f}×",
+            "Implied Volatility": "{:.2%}",
+            "Volume": "{:d}",
+            "Open Interest": "{:d}",
         })
-        .apply(style_activity, subset=["activity_level"])
+        .apply(style_activity, subset=["Activity"])
     )
 
     st.dataframe(
