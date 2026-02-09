@@ -109,6 +109,37 @@ watchlist_input = st.sidebar.text_area(
 
 watchlist = [s.strip().upper() for s in watchlist_input.split(",") if s.strip()]
 
+
+# =========================
+# Expiration selection (per ticker)
+# =========================
+st.sidebar.markdown("### 🗓️ Expiration Selection")
+
+@st.cache_data(ttl=300)
+def safe_get_expirations(ticker):
+    try:
+        exps = yf.Ticker(ticker).options
+        return list(exps) if exps else []
+    except Exception:
+        return []
+
+expiration_map = {}
+
+for symbol in watchlist:
+    expirations = safe_get_expirations(symbol)
+
+    if not expirations:
+        expiration_map[symbol] = None
+        continue
+
+    # Default to nearest expiration (Yahoo behavior)
+    expiration_map[symbol] = st.sidebar.selectbox(
+        f"{symbol} expiration",
+        options=expirations,
+        index=0,
+        key=f"exp_{symbol}"
+    )
+
 st.sidebar.markdown("### ⚙️ Activity Interpretation")
 
 UNUSUAL_MIN = st.sidebar.number_input("Unusual (Vol / OI ≥)", 0.1, value=1.0, step=0.1)
@@ -235,12 +266,16 @@ for symbol in watchlist:
         if not expirations:
             continue
 
-        expiration = expirations[0]
+        expiration = expiration_map.get(symbol)
+        if not expiration:
+            continue
+
         calls, puts = load_chain(symbol, expiration)
 
         call_vol = calls["volume"].fillna(0).sum()
         put_vol = puts["volume"].fillna(0).sum()
         ratio = call_vol / put_vol if put_vol > 0 else None
+
 
         bias = "Neutral"
         if ratio is not None:
